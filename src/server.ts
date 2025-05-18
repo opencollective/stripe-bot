@@ -1,10 +1,18 @@
 // deno-lint-ignore-file no-explicit-any
 import { postToDiscordChannel } from "./lib/discord.ts";
+import { createHmac } from "node:crypto";
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
 
 let eventsProcessed: number = 0;
-let startTimestamp: number = Date.now();
+const startTimestamp: number = Date.now();
+
+const eventTypes = ["charge.succeeded", "charge.refunded"];
+
+const STRIPE_SIGNING_SECRET = Deno.env.get("STRIPE_SIGNING_SECRET");
+if (!STRIPE_SIGNING_SECRET) {
+  throw new Error("STRIPE_SIGNING_SECRET is not set in the environment");
+}
 
 const getApplicationName = (application_id: string) => {
   const apps: Record<string, string> = {
@@ -22,10 +30,17 @@ const getPaymentMethod = (payment_method_details: any) => {
 };
 
 function summarizeStripeEvent(event: any): string {
-  console.log("summarizeStripeEvent Stripe event:", event);
+  const ch = event.data.object;
+  if (event.type === "charge.refunded") {
+    const amount = ch.amount_refunded / 100;
+    const currency = ch.currency.toUpperCase();
+    const description = ch.description || ch.statement_descriptor;
+    const description_string = description ? ` (${description})` : "";
+    return `Refunded ${amount} ${currency} to ${
+      ch.billing_details?.name || "unknown"
+    }${description_string} [[View Receipt](<${ch.receipt_url}>)]`;
+  }
   if (event.type === "charge.succeeded") {
-    const ch = event.data.object;
-
     const description = ch.description || ch.statement_descriptor;
     const description_string = description ? ` (${description})` : "";
 
@@ -77,7 +92,33 @@ const handler = async (req: Request) => {
   if (req.method !== "POST") {
     return new Response("Only POST allowed", { status: 405 });
   }
+
+  // Get the Stripe signature from the headers
+  const signature = req.headers.get("stripe-signature");
+  if (!signature) {
+    return new Response("No Stripe signature found", { status: 400 });
+  }
+
+  // Get the raw body as text
   const body = await req.text();
+
+  // Verify the signature
+  try {
+    const timestamp = signature.split(",")[0].split("=")[1];
+    const signedPayload = `${timestamp}.${body}`;
+    const expectedSignature = createHmac("sha256", STRIPE_SIGNING_SECRET)
+      .update(signedPayload)
+      .digest("hex");
+
+    const receivedSignature = signature.split(",")[1].split("=")[1];
+    if (receivedSignature !== expectedSignature) {
+      return new Response("Invalid signature", { status: 400 });
+    }
+  } catch (e) {
+    console.error("Error verifying signature:", e);
+    return new Response("Error verifying signature", { status: 400 });
+  }
+
   let event;
   try {
     event = JSON.parse(body);
@@ -85,8 +126,8 @@ const handler = async (req: Request) => {
     console.error("Invalid JSON", e);
     return new Response("Invalid JSON", { status: 400 });
   }
-  if (event.type !== "charge.succeeded") {
-    return new Response("Not a charge.succeeded event", { status: 200 });
+  if (!eventTypes.includes(event.type)) {
+    return new Response(`Event ${event.type} not supported`, { status: 200 });
   }
   const summary = summarizeStripeEvent(event);
   await postToDiscordChannel(summary);
