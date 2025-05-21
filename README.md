@@ -19,7 +19,7 @@ or to avoid the interactive permissions granting:
 ```sh
 deno run \
   --allow-read=node_modules \
-  --allow-net=0.0.0.0,discord.com,discord.gg,gateway.discord.gg \
+  --allow-net=0.0.0.0,discord.com,discord.gg,gateway.discord.gg,api.stripe.com \
   --allow-env \
   --no-prompt \
   --env-file=.env \
