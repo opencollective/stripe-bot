@@ -1,6 +1,12 @@
 // deno-lint-ignore-file no-explicit-any
 import { postToDiscordChannel } from "./lib/discord.ts";
 import { createHmac } from "node:crypto";
+import Stripe from "npm:stripe";
+const stripeSecret = Deno.env.get("STRIPE_SECRET");
+if (!stripeSecret) {
+  throw new Error("STRIPE_SECRET is not set in the environment");
+}
+const stripe = new Stripe(stripeSecret);
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
 
@@ -29,7 +35,7 @@ const getPaymentMethod = (payment_method_details: any) => {
   return payment_method_details.type;
 };
 
-function summarizeStripeEvent(event: any): string {
+async function summarizeStripeEvent(event: any): Promise<string> {
   const ch = event.data.object;
   if (event.type === "charge.refunded") {
     const amount = ch.amount_refunded / 100;
@@ -41,7 +47,20 @@ function summarizeStripeEvent(event: any): string {
     }${description_string} [[View Receipt](<${ch.receipt_url}>)]`;
   }
   if (event.type === "charge.succeeded") {
-    const description = ch.description || ch.statement_descriptor;
+    let description = ch.description || ch.statement_descriptor;
+    if (ch.invoice) {
+      try {
+        const invoice = await stripe.invoices.retrieve(ch.invoice);
+        description = invoice.lines.data
+          .map((line: Stripe.InvoiceLineItem) => {
+            return line.description;
+          })
+          .join(" \n");
+      } catch (e) {
+        console.error("Error getting invoice", ch.invoice, e);
+      }
+    }
+
     const description_string = description ? ` (${description})` : "";
 
     const applicationFee = ch.application_fee
@@ -129,7 +148,7 @@ const handler = async (req: Request) => {
   if (!eventTypes.includes(event.type)) {
     return new Response(`Event ${event.type} not supported`, { status: 200 });
   }
-  const summary = summarizeStripeEvent(event);
+  const summary = await summarizeStripeEvent(event);
   await postToDiscordChannel(summary);
   eventsProcessed++;
   return new Response("ok");
