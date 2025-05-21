@@ -16,9 +16,6 @@ const startTimestamp: number = Date.now();
 const eventTypes = ["charge.succeeded", "charge.refunded"];
 
 const STRIPE_SIGNING_SECRET = Deno.env.get("STRIPE_SIGNING_SECRET");
-if (!STRIPE_SIGNING_SECRET) {
-  throw new Error("STRIPE_SIGNING_SECRET is not set in the environment");
-}
 
 const getApplicationName = (application_id: string) => {
   const apps: Record<string, string> = {
@@ -35,24 +32,34 @@ const getPaymentMethod = (payment_method_details: any) => {
   return payment_method_details.type;
 };
 
-async function summarizeStripeEvent(event: any): Promise<string> {
+const currencySymbols = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  CAD: "$",
+  AUD: "$",
+};
+
+function formatAmount(amount: number, currency: string): string {
+  return `${
+    currencySymbols[currency.toUpperCase() as keyof typeof currencySymbols]
+  }${(amount / 100).toFixed(2)}`;
+}
+
+export async function summarizeStripeEvent(event: any): Promise<string> {
   const ch = event.data.object;
   if (event.type === "charge.refunded") {
-    const amount = ch.amount_refunded / 100;
-    const currency = ch.currency.toUpperCase();
     const description = ch.description || ch.statement_descriptor;
     const description_string = description ? ` (${description})` : "";
-    return `Refunded ${amount} ${currency} to ${
+    return `Refunded ${formatAmount(ch.amount_refunded, ch.currency)} to ${
       ch.billing_details?.name || "unknown"
     }${description_string} [[View Receipt](<${ch.receipt_url}>)]`;
   }
   if (event.type === "charge.succeeded") {
     let description = ch.description || ch.statement_descriptor;
-    console.log(">>> description", description, "invoice", ch.invoice);
     if (ch.invoice) {
       try {
         const invoice = await stripe.invoices.retrieve(ch.invoice);
-        console.log(">>> invoic object", invoice);
         description = invoice.lines.data
           .map((line: Stripe.InvoiceLineItem) => {
             return line.description;
@@ -66,24 +73,24 @@ async function summarizeStripeEvent(event: any): Promise<string> {
     const description_string = description ? ` (${description})` : "";
 
     const applicationFee = ch.application_fee
-      ? ` (including ${
-          ch.application_fee / 100
-        } ${ch.currency.toUpperCase()} application fee)`
+      ? ` (including ${formatAmount(
+          ch.application_fee,
+          ch.currency
+        )} ${getApplicationName(ch.application)} application fee)`
       : "";
-    return `Received ${
-      ch.amount / 100
-    } ${ch.currency.toUpperCase()}${applicationFee} from ${
+    return `Received ${formatAmount(
+      ch.amount,
+      ch.currency
+    )}${applicationFee} from ${
       ch.billing_details?.name || "unknown"
-    }${description_string} [[View Receipt](<${
-      ch.receipt_url
-    }>)] (using ${getPaymentMethod(
+    }${description_string} (💳 ${getPaymentMethod(
       ch.payment_method_details
-    )} via ${getApplicationName(ch.application)})`;
+    )}) [[View Receipt](<${ch.receipt_url}>)]`;
   }
   return `Received Stripe event: ${event.type}`;
 }
 
-const handler = async (req: Request) => {
+export const handler = async (req: Request) => {
   const url = new URL(req.url);
 
   if (url.pathname === "/" && req.method === "GET") {
@@ -124,20 +131,22 @@ const handler = async (req: Request) => {
   const body = await req.text();
 
   // Verify the signature
-  try {
-    const timestamp = signature.split(",")[0].split("=")[1];
-    const signedPayload = `${timestamp}.${body}`;
-    const expectedSignature = createHmac("sha256", STRIPE_SIGNING_SECRET)
-      .update(signedPayload)
-      .digest("hex");
+  if (STRIPE_SIGNING_SECRET) {
+    try {
+      const timestamp = signature.split(",")[0].split("=")[1];
+      const signedPayload = `${timestamp}.${body}`;
+      const expectedSignature = createHmac("sha256", STRIPE_SIGNING_SECRET)
+        .update(signedPayload)
+        .digest("hex");
 
-    const receivedSignature = signature.split(",")[1].split("=")[1];
-    if (receivedSignature !== expectedSignature) {
-      return new Response("Invalid signature", { status: 400 });
+      const receivedSignature = signature.split(",")[1].split("=")[1];
+      if (receivedSignature !== expectedSignature) {
+        return new Response("Invalid signature", { status: 400 });
+      }
+    } catch (e) {
+      console.error("Error verifying signature:", e);
+      return new Response("Error verifying signature", { status: 400 });
     }
-  } catch (e) {
-    console.error("Error verifying signature:", e);
-    return new Response("Error verifying signature", { status: 400 });
   }
 
   let event;
