@@ -48,9 +48,11 @@ async function summarizeStripeEvent(event: any): Promise<string> {
   }
   if (event.type === "charge.succeeded") {
     let description = ch.description || ch.statement_descriptor;
+    console.log(">>> description", description, "invoice", ch.invoice);
     if (ch.invoice) {
       try {
         const invoice = await stripe.invoices.retrieve(ch.invoice);
+        console.log(">>> invoic object", invoice);
         description = invoice.lines.data
           .map((line: Stripe.InvoiceLineItem) => {
             return line.description;
