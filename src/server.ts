@@ -2,6 +2,7 @@
 import { postToDiscordChannel } from "./lib/discord.ts";
 import { createHmac } from "node:crypto";
 import Stripe from "npm:stripe";
+import { getOrderInfo } from "./lib/opencollective.ts";
 const stripeSecret = Deno.env.get("STRIPE_SECRET");
 if (!stripeSecret) {
   throw new Error("STRIPE_SECRET is not set in the environment");
@@ -57,6 +58,7 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
   }
   if (event.type === "charge.succeeded") {
     let description = ch.description || ch.statement_descriptor;
+    let from = ch.billing_details?.name || "unknown";
     if (ch.invoice) {
       try {
         const invoice = await stripe.invoices.retrieve(ch.invoice);
@@ -69,6 +71,11 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
         console.error("Error getting invoice", ch.invoice, e);
       }
     }
+    if (getApplicationName(ch.application) === "Open Collective") {
+      const orderInfo = await getOrderInfo(Number(ch.metadata.orderId));
+      description = orderInfo.description;
+      from = `[${orderInfo.createdByAccount.name}](<https://opencollective.com/${orderInfo.createdByAccount.slug}>)`;
+    }
 
     const description_string = description ? ` (${description})` : "";
 
@@ -78,14 +85,12 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
           ch.currency
         )} ${getApplicationName(ch.application)} application fee)`
       : "";
-    return `Received ${formatAmount(
+    return `💳 Received ${formatAmount(
       ch.amount,
       ch.currency
-    )}${applicationFee} from ${
-      ch.billing_details?.name || "unknown"
-    }${description_string} (💳 ${getPaymentMethod(
-      ch.payment_method_details
-    )}) [[View Receipt](<${ch.receipt_url}>)]`;
+    )}${applicationFee} from ${from}${description_string} [[View Receipt](<${
+      ch.receipt_url
+    }>)]`;
   }
   return `Received Stripe event: ${event.type}`;
 }

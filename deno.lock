@@ -3,6 +3,7 @@
   "specifiers": {
     "npm:@types/node@*": "22.12.0",
     "npm:discord.js@*": "14.16.3",
+    "npm:graphql-request@*": "7.2.0_graphql@16.11.0",
     "npm:stripe@*": "18.1.1_@types+node@22.12.0"
   },
   "npm": {
@@ -59,6 +60,12 @@
         "discord-api-types@0.37.83",
         "tslib",
         "ws"
+      ]
+    },
+    "@graphql-typed-document-node/core@3.2.0_graphql@16.11.0": {
+      "integrity": "sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ==",
+      "dependencies": [
+        "graphql"
       ]
     },
     "@sapphire/async-queue@1.5.3": {
@@ -179,6 +186,16 @@
     },
     "gopd@1.2.0": {
       "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg=="
+    },
+    "graphql-request@7.2.0_graphql@16.11.0": {
+      "integrity": "sha512-0GR7eQHBFYz372u9lxS16cOtEekFlZYB2qOyq8wDvzRmdRSJ0mgUVX1tzNcIzk3G+4NY+mGtSz411wZdeDF/+A==",
+      "dependencies": [
+        "@graphql-typed-document-node/core",
+        "graphql"
+      ]
+    },
+    "graphql@16.11.0": {
+      "integrity": "sha512-mS1lbMsxgQj6hge1XZ6p7GPhbrtFwUFYi3wRzXAC/FmYnyXMTvvI3td3rjmQ2u8ewXueaSvRPWaEcgVVOT9Jnw=="
     },
     "has-symbols@1.1.0": {
       "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ=="
@@ -314,7 +331,8 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@std/assert@1"
+      "jsr:@std/assert@1",
+      "npm:graphql-request@^7.2.0"
     ]
   }
 }
