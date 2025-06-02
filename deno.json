@@ -1,5 +1,6 @@
 {
   "tasks": {
+    "test": "deno test -A --env-file=.env.test",
     "dev": "deno run --watch main.ts"
   },
   "imports": {
