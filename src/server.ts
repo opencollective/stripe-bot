@@ -58,7 +58,17 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
   }
   if (event.type === "charge.succeeded") {
     let description = ch.description || ch.statement_descriptor;
-    let from = ch.billing_details?.name || "unknown";
+    let from = "unknown";
+
+    if (ch.billing_details?.name) {
+      from = ch.billing_details.name;
+    } else {
+      const customer = await stripe.customers.retrieve(ch.customer);
+      if (!customer.deleted && customer.name) {
+        from = customer.name;
+      }
+    }
+
     if (ch.invoice) {
       try {
         const invoice = await stripe.invoices.retrieve(ch.invoice);
