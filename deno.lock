@@ -4,7 +4,9 @@
     "npm:@types/node@*": "22.12.0",
     "npm:discord.js@*": "14.16.3",
     "npm:graphql-request@*": "7.2.0_graphql@16.11.0",
-    "npm:stripe@*": "18.1.1_@types+node@22.12.0"
+    "npm:stripe@*": "18.1.1_@types+node@22.12.0",
+    "npm:stripe@18.2": "18.2.0_@types+node@22.12.0",
+    "npm:stripe@latest": "18.2.0_@types+node@22.12.0"
   },
   "npm": {
     "@discordjs/builders@1.9.0": {
@@ -265,6 +267,16 @@
     },
     "stripe@18.1.1_@types+node@22.12.0": {
       "integrity": "sha512-hlF0ripc2nJrihpsJZQDl3xirS7tpdpS7DlmSNLEDRW8j7Qr215y5DHOI3+aEY/lq6PG8y4GR1RZPtEoIoAs/g==",
+      "dependencies": [
+        "@types/node",
+        "qs"
+      ],
+      "optionalPeers": [
+        "@types/node"
+      ]
+    },
+    "stripe@18.2.0_@types+node@22.12.0": {
+      "integrity": "sha512-RpOaGh5CLs3SYeVXw1CIQZNwPVADBJtgNyUgu+ZkIvu3u4pkZvNrlKr+WaLoNjSPQWef0dikxDS2AKHBl/l3bg==",
       "dependencies": [
         "@types/node",
         "qs"

@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { postToDiscordChannel } from "./lib/discord.ts";
 import { createHmac } from "node:crypto";
-import Stripe from "npm:stripe";
+import Stripe from "npm:stripe@18.2";
 import { getOrderInfo } from "./lib/opencollective.ts";
 const stripeSecret = Deno.env.get("STRIPE_SECRET");
 if (!stripeSecret) {
@@ -57,43 +57,53 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
     }${description_string} [[View Receipt](<${ch.receipt_url}>)]`;
   }
   if (event.type === "charge.succeeded") {
-    let description = ch.description || ch.statement_descriptor;
+    let description =
+      ch.statement_descriptor ||
+      ch.calculated_statement_descriptor ||
+      ch.description;
     let from = "unknown";
-    const customer = await stripe.customers.retrieve(ch.customer);
-    if (!customer.deleted && customer.name) {
-      from = customer.name;
+
+    if (ch.customer) {
+      const customer = await stripe.customers.retrieve(ch.customer);
+      if (!customer.deleted && customer.name) {
+        from = customer.name;
+      }
+      if (!customer.deleted && customer.metadata?.discord_userid) {
+        from = `<@${customer.metadata.discord_userid}>`;
+      }
+    } else if (ch.billing_details?.name) {
+      from = ch.billing_details.name;
     }
 
-    if (!customer.deleted && customer.metadata?.discord_userid) {
-      from = `<@${customer.metadata.discord_userid}>`;
-    }
-
-    let invoiceId = ch.invoice;
-    if (!invoiceId && ch.payment_intent) {
+    if (!ch.invoice && ch.payment_intent) {
       console.log(">>> fetching ch.payment_intent", ch.payment_intent);
       const paymentIntent = await stripe.paymentIntents.retrieve(
-        ch.payment_intent
+        ch.payment_intent,
+        { expand: ["invoice"] }
       );
       console.log(">>> paymentIntent", paymentIntent);
       if ("invoice" in paymentIntent) {
-        invoiceId = paymentIntent.invoice as string;
+        const invoice = paymentIntent.invoice as Stripe.Invoice;
+        description = invoice.lines.data
+          .map((line: Stripe.InvoiceLineItem) => {
+            return line.description;
+          })
+          .join(" \n");
       }
-      console.log(">>> invoiceId", invoiceId);
-    }
-
-    if (invoiceId) {
+    } else if (ch.invoice) {
       try {
-        console.log(">>> fetching invoice", invoiceId);
-        const invoice = await stripe.invoices.retrieve(invoiceId);
+        console.log(">>> fetching invoice", ch.invoice);
+        const invoice = await stripe.invoices.retrieve(ch.invoice);
         description = invoice.lines.data
           .map((line: Stripe.InvoiceLineItem) => {
             return line.description;
           })
           .join(" \n");
       } catch (e) {
-        console.error("Error getting invoice", invoiceId, e);
+        console.error("Error getting invoice", ch.invoice, e);
       }
     }
+
     if (getApplicationName(ch.application) === "Open Collective") {
       const orderInfo = await getOrderInfo(Number(ch.metadata.orderId));
       description = orderInfo.description;

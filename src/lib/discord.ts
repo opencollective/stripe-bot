@@ -35,6 +35,10 @@ export async function postToDiscordChannel(message: string) {
   if (!channel || !(channel instanceof TextChannel)) {
     throw new Error("Channel not found or is not a text channel");
   }
+  if (Deno.env.get("ENV") === "dev") {
+    console.log(">>> dry run discord message:", message);
+    return;
+  }
   await channel.send(message);
 }
 
