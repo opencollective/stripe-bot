@@ -69,7 +69,17 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
       }
     }
 
-    if (ch.invoice) {
+    let invoiceId = ch.invoice;
+    if (ch.payment_intent) {
+      const paymentIntent = await stripe.paymentIntents.retrieve(
+        ch.payment_intent
+      );
+      if ("invoice" in paymentIntent) {
+        invoiceId = paymentIntent.invoice as string;
+      }
+    }
+
+    if (invoiceId) {
       try {
         const invoice = await stripe.invoices.retrieve(ch.invoice);
         description = invoice.lines.data
