@@ -15,7 +15,7 @@ let eventsProcessed: number = 0;
 const startTimestamp: number = Date.now();
 
 const eventTypes = ["charge.succeeded", "charge.refunded"];
-
+const ignoreEvents = ["evt_3RZSkmFAhaWeDyow2nUtzMTL"];
 const STRIPE_SIGNING_SECRET = Deno.env.get("STRIPE_SIGNING_SECRET");
 
 const getApplicationName = (application_id: string) => {
@@ -59,36 +59,39 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
   if (event.type === "charge.succeeded") {
     let description = ch.description || ch.statement_descriptor;
     let from = "unknown";
+    const customer = await stripe.customers.retrieve(ch.customer);
+    if (!customer.deleted && customer.name) {
+      from = customer.name;
+    }
 
-    if (ch.billing_details?.name) {
-      from = ch.billing_details.name;
-    } else {
-      const customer = await stripe.customers.retrieve(ch.customer);
-      if (!customer.deleted && customer.name) {
-        from = customer.name;
-      }
+    if (!customer.deleted && customer.metadata?.discord_userid) {
+      from = `<@${customer.metadata.discord_userid}>`;
     }
 
     let invoiceId = ch.invoice;
-    if (ch.payment_intent) {
+    if (!invoiceId && ch.payment_intent) {
+      console.log(">>> fetching ch.payment_intent", ch.payment_intent);
       const paymentIntent = await stripe.paymentIntents.retrieve(
         ch.payment_intent
       );
+      console.log(">>> paymentIntent", paymentIntent);
       if ("invoice" in paymentIntent) {
         invoiceId = paymentIntent.invoice as string;
       }
+      console.log(">>> invoiceId", invoiceId);
     }
 
     if (invoiceId) {
       try {
-        const invoice = await stripe.invoices.retrieve(ch.invoice);
+        console.log(">>> fetching invoice", invoiceId);
+        const invoice = await stripe.invoices.retrieve(invoiceId);
         description = invoice.lines.data
           .map((line: Stripe.InvoiceLineItem) => {
             return line.description;
           })
           .join(" \n");
       } catch (e) {
-        console.error("Error getting invoice", ch.invoice, e);
+        console.error("Error getting invoice", invoiceId, e);
       }
     }
     if (getApplicationName(ch.application) === "Open Collective") {
@@ -185,6 +188,11 @@ export const handler = async (req: Request) => {
     return new Response(`Event ${event.type} not supported`, { status: 200 });
   }
   const summary = await summarizeStripeEvent(event);
+  if (ignoreEvents.includes(event.id)) {
+    console.log(">>> ignoring event", event.id);
+    console.log(">>> dry run discord message:", summary);
+    return new Response("ok");
+  }
   await postToDiscordChannel(summary);
   eventsProcessed++;
   return new Response("ok");
