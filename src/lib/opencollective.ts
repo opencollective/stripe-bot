@@ -5,7 +5,7 @@
  * - process.env.OPENCOLLECTIVE_GRAPHQL_API
  */
 
-import { GraphQLClient, gql } from "npm:graphql-request";
+import { GraphQLClient, gql } from "graphql-request";
 
 interface Filter {
   dateFrom?: string;
@@ -65,7 +65,10 @@ const orderInfoQuery = gql`
   }
 `;
 
-const graphqlQuery = async (query: string, variables: any) => {
+const graphqlQuery = async (
+  query: string,
+  variables: Record<string, string | number>
+) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
     controller.abort();
@@ -91,6 +94,5 @@ export const getOrderInfo = async (orderId: number): Promise<Order> => {
   const res = (await graphqlQuery(orderInfoQuery, {
     orderId,
   })) as { order: Order };
-  console.log(">>> getOrderInfo res", res);
   return res.order;
 };

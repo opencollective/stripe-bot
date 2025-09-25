@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { postToDiscordChannel } from "./lib/discord.ts";
 import { createHmac } from "node:crypto";
-import Stripe from "npm:stripe@18.2";
+import Stripe from "stripe";
 import { getOrderInfo } from "./lib/opencollective.ts";
 const stripeSecret = Deno.env.get("STRIPE_SECRET");
 if (!stripeSecret) {
@@ -24,13 +24,6 @@ const getApplicationName = (application_id: string) => {
     ca_68FQ4jN0XMVhxpnk6gAptwvx90S9VYXF: "Open Collective",
   };
   return apps[application_id] || "Stripe";
-};
-
-const getPaymentMethod = (payment_method_details: any) => {
-  if (payment_method_details.type === "card") {
-    return payment_method_details["card"]["brand"];
-  }
-  return payment_method_details.type;
 };
 
 const currencySymbols = {
@@ -61,6 +54,7 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
       ch.statement_descriptor ||
       ch.calculated_statement_descriptor ||
       ch.description;
+
     let from = "unknown";
 
     if (ch.customer) {
@@ -108,6 +102,10 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
       const orderInfo = await getOrderInfo(Number(ch.metadata.orderId));
       description = orderInfo.description;
       from = `[${orderInfo.createdByAccount.name}](<https://opencollective.com/${orderInfo.createdByAccount.slug}>)`;
+    }
+
+    if (getApplicationName(ch.application) === "Luma") {
+      description = `🎟️ Ticket for ${ch.description}`;
     }
 
     const description_string = description ? ` (${description})` : "";
@@ -213,3 +211,5 @@ Deno.serve({ port: PORT }, handler);
 console.log(
   `Listening for Stripe webhooks on http://localhost:${PORT}/webhook/stripe`
 );
+
+console.log(">>> Using Discord channel", Deno.env.get("DISCORD_CHANNEL_ID"));

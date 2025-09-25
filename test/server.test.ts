@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/assert/mod.ts";
+import { assertEquals } from "@std/assert";
 import { handler, summarizeStripeEvent } from "../src/server.ts";
 
 const mockChargeSucceededEvent = {
@@ -71,7 +71,7 @@ Deno.test("handler processes charge.succeeded event", async () => {
   const res = await summarizeStripeEvent(mockChargeSucceededEvent);
   assertEquals(
     res,
-    "💳 Received $20.00 (including $2.00 Luma application fee) from John Doe (Test charge) [[View Receipt](<https://receipt.stripe.com/test>)]"
+    "💳 Received $20.00 (including $2.00 Luma application fee) from John Doe (🎟️ Ticket for Test charge) [[View Receipt](<https://receipt.stripe.com/test>)]"
   );
   console.log(">>> res", res);
 });

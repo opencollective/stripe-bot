@@ -1,5 +1,5 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { getOrderInfo, Order } from "./opencollective.ts";
+import { expect } from "@std/expect";
 
 Deno.test(
   "getOrderInfo should return correct order data for order 837122",
@@ -28,6 +28,6 @@ Deno.test(
     };
 
     const result = await getOrderInfo(orderId);
-    assertEquals(result, expectedResult);
+    expect(result).toEqual(expectedResult);
   }
 );
