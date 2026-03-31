@@ -14,9 +14,128 @@ const PORT = Number(Deno.env.get("PORT") ?? 3000);
 let eventsProcessed: number = 0;
 const startTimestamp: number = Date.now();
 
-const eventTypes = ["charge.succeeded", "charge.refunded"];
+const eventTypes = [
+  "charge.succeeded",
+  "charge.refunded",
+  "checkout.session.completed",
+];
 const ignoreEvents = ["evt_3RZSkmFAhaWeDyow2nUtzMTL"];
 const STRIPE_SIGNING_SECRET = Deno.env.get("STRIPE_SIGNING_SECRET");
+
+// Event buffer: holds events keyed by payment_intent for up to BUFFER_TIMEOUT_MS
+// so that checkout.session.completed metadata can enrich the charge.succeeded message
+const BUFFER_TIMEOUT_MS = 60_000;
+
+interface BufferedEntry {
+  chargeEvent?: any;
+  checkoutSession?: any;
+  timerId?: ReturnType<typeof setTimeout>;
+}
+
+export const eventBuffer = new Map<string, BufferedEntry>();
+
+function getPaymentIntentId(event: any): string | null {
+  if (event.type === "charge.succeeded" || event.type === "charge.refunded") {
+    return event.data.object.payment_intent || null;
+  }
+  if (event.type === "checkout.session.completed") {
+    return event.data.object.payment_intent || null;
+  }
+  return null;
+}
+
+function formatCustomFields(session: any): string {
+  const fields = session.custom_fields;
+  if (!fields || fields.length === 0) return "";
+  const rows = fields
+    .map((f: any) => {
+      const label = f.label?.custom || f.label?.value || f.key;
+      const value =
+        f.text?.value || f.dropdown?.value || f.numeric?.value || "";
+      return `| ${label} | ${value} |`;
+    })
+    .join("\n");
+  return `\n| Field | Value |\n|---|---|\n${rows}`;
+}
+
+function getCheckoutSessionMetadata(session: any): {
+  collective?: string;
+  customFieldsTable: string;
+} {
+  const metadata = session.metadata || {};
+  return {
+    collective: metadata.collective || undefined,
+    customFieldsTable: formatCustomFields(session),
+  };
+}
+
+async function processBufferedEntry(
+  paymentIntentId: string,
+  entry: BufferedEntry
+) {
+  eventBuffer.delete(paymentIntentId);
+
+  // If we only have a checkout session and no charge, nothing to post
+  if (!entry.chargeEvent) {
+    console.log(
+      ">>> checkout.session.completed received without matching charge, skipping",
+      paymentIntentId
+    );
+    return;
+  }
+
+  const sessionMeta = entry.checkoutSession
+    ? getCheckoutSessionMetadata(entry.checkoutSession)
+    : null;
+
+  const summary = await summarizeStripeEvent(entry.chargeEvent, sessionMeta);
+
+  if (ignoreEvents.includes(entry.chargeEvent.id)) {
+    console.log(">>> ignoring event", entry.chargeEvent.id);
+    console.log(">>> dry run discord message:", summary);
+    return;
+  }
+
+  await postToDiscordChannel(summary);
+  eventsProcessed++;
+}
+
+export function bufferEvent(event: any) {
+  const piId = getPaymentIntentId(event);
+  if (!piId) {
+    // No payment intent — can't buffer, process immediately
+    return null;
+  }
+
+  const existing = eventBuffer.get(piId) || {};
+
+  if (event.type === "charge.succeeded") {
+    existing.chargeEvent = event;
+  } else if (event.type === "checkout.session.completed") {
+    existing.checkoutSession = event.data.object;
+  }
+
+  // If we have both events, process immediately
+  if (existing.chargeEvent && existing.checkoutSession) {
+    if (existing.timerId) clearTimeout(existing.timerId);
+    eventBuffer.set(piId, existing);
+    processBufferedEntry(piId, existing);
+    return "processed";
+  }
+
+  // Otherwise, start/keep timeout
+  if (!existing.timerId) {
+    existing.timerId = setTimeout(() => {
+      const entry = eventBuffer.get(piId);
+      if (entry) {
+        processBufferedEntry(piId, entry);
+      }
+    }, BUFFER_TIMEOUT_MS);
+  }
+
+  eventBuffer.set(piId, existing);
+  return "buffered";
+}
 
 const getApplicationName = (application_id: string) => {
   const apps: Record<string, string> = {
@@ -40,7 +159,10 @@ function formatAmount(amount: number, currency: string): string {
   }${(amount / 100).toFixed(2)}`;
 }
 
-export async function summarizeStripeEvent(event: any): Promise<string> {
+export async function summarizeStripeEvent(
+  event: any,
+  sessionMeta?: { collective?: string; customFieldsTable: string } | null
+): Promise<string> {
   const ch = event.data.object;
   if (event.type === "charge.refunded") {
     const description = ch.description || ch.statement_descriptor;
@@ -108,6 +230,10 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
       description = `🎟️ Ticket for ${ch.description}`;
     }
 
+    // Enrich with checkout session metadata (collective, custom fields)
+    const collective = sessionMeta?.collective;
+    const collectiveStr = collective ? ` for **${collective}**` : "";
+
     const description_string = description ? ` (${description})` : "";
 
     const applicationFee = ch.application_fee
@@ -116,12 +242,19 @@ export async function summarizeStripeEvent(event: any): Promise<string> {
           ch.currency
         )} ${getApplicationName(ch.application)} application fee)`
       : "";
-    return `💳 Received ${formatAmount(
+
+    let message = `💳 Received ${formatAmount(
       ch.amount,
       ch.currency
-    )}${applicationFee} from ${from}${description_string} [[View Receipt](<${
+    )}${applicationFee} from ${from}${collectiveStr}${description_string} [[View Receipt](<${
       ch.receipt_url
     }>)]`;
+
+    if (sessionMeta?.customFieldsTable) {
+      message += sessionMeta.customFieldsTable;
+    }
+
+    return message;
   }
   return `Received Stripe event: ${event.type}`;
 }
@@ -195,14 +328,34 @@ export const handler = async (req: Request) => {
   if (!eventTypes.includes(event.type)) {
     return new Response(`Event ${event.type} not supported`, { status: 200 });
   }
-  const summary = await summarizeStripeEvent(event);
-  if (ignoreEvents.includes(event.id)) {
-    console.log(">>> ignoring event", event.id);
-    console.log(">>> dry run discord message:", summary);
+
+  // Refunds don't need buffering — process immediately
+  if (event.type === "charge.refunded") {
+    const summary = await summarizeStripeEvent(event);
+    if (ignoreEvents.includes(event.id)) {
+      console.log(">>> ignoring event", event.id);
+      console.log(">>> dry run discord message:", summary);
+      return new Response("ok");
+    }
+    await postToDiscordChannel(summary);
+    eventsProcessed++;
     return new Response("ok");
   }
-  await postToDiscordChannel(summary);
-  eventsProcessed++;
+
+  // Buffer charge.succeeded and checkout.session.completed events
+  // to merge metadata before posting to Discord
+  const result = bufferEvent(event);
+  if (result === null) {
+    // No payment_intent — can't buffer, process immediately
+    const summary = await summarizeStripeEvent(event);
+    if (ignoreEvents.includes(event.id)) {
+      console.log(">>> ignoring event", event.id);
+      console.log(">>> dry run discord message:", summary);
+      return new Response("ok");
+    }
+    await postToDiscordChannel(summary);
+    eventsProcessed++;
+  }
   return new Response("ok");
 };
 
