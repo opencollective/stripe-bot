@@ -52,10 +52,10 @@ function formatCustomFields(session: any): string {
       const label = f.label?.custom || f.label?.value || f.key;
       const value =
         f.text?.value || f.dropdown?.value || f.numeric?.value || "";
-      return `| ${label} | ${value} |`;
+      return `> **${label}:** ${value}`;
     })
     .join("\n");
-  return `\n| Field | Value |\n|---|---|\n${rows}`;
+  return `\n${rows}`;
 }
 
 function getCheckoutSessionMetadata(session: any): {
