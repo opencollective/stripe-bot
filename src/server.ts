@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 import { postToDiscordChannel } from "./lib/discord.ts";
+import { reportTransaction, type TransactionReport } from "./lib/report.ts";
 import { createHmac } from "node:crypto";
 import Stripe from "stripe";
 import { getOrderInfo } from "./lib/opencollective.ts";
@@ -7,7 +8,7 @@ const stripeSecret = Deno.env.get("STRIPE_SECRET");
 if (!stripeSecret) {
   throw new Error("STRIPE_SECRET is not set in the environment");
 }
-const stripe = new Stripe(stripeSecret);
+export const stripe = new Stripe(stripeSecret);
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
 
@@ -58,7 +59,7 @@ function formatCustomFields(session: any): string {
   return `\n${rows}`;
 }
 
-function getCheckoutSessionMetadata(session: any): {
+export function getCheckoutSessionMetadata(session: any): {
   collective?: string;
   customFieldsTable: string;
 } {
@@ -88,15 +89,13 @@ async function processBufferedEntry(
     ? getCheckoutSessionMetadata(entry.checkoutSession)
     : null;
 
-  const summary = await summarizeStripeEvent(entry.chargeEvent, sessionMeta);
-
   if (ignoreEvents.includes(entry.chargeEvent.id)) {
     console.log(">>> ignoring event", entry.chargeEvent.id);
-    console.log(">>> dry run discord message:", summary);
+    console.log(">>> dry run discord message:", await summarizeStripeEvent(entry.chargeEvent, sessionMeta));
     return;
   }
 
-  await postToDiscordChannel(summary);
+  await publishStripeEvent(entry.chargeEvent, sessionMeta);
   eventsProcessed++;
 }
 
@@ -159,104 +158,197 @@ function formatAmount(amount: number, currency: string): string {
   }${(amount / 100).toFixed(2)}`;
 }
 
+/** What a Stripe charge or refund was, read once: for the plain message and the standard report. */
+export interface StripeTransaction {
+  kind: "charge" | "refund";
+  /** Cents. */
+  amount: number;
+  currency: string;
+  from: string;
+  description?: string;
+  applicationFee?: string;
+  collective?: string;
+  customFieldsTable?: string;
+  receiptUrl?: string;
+  /** stripe:txn_… (the balance transaction), chb's form. */
+  uri?: string;
+  category?: string;
+  occurredAt?: string;
+}
+
+/** A chb category, only when the payment says so clearly; the stewards set the rest from Discord. */
+export function guessCategory(ch: any, description: string | undefined, collective: string | undefined): string | undefined {
+  if (collective && collective !== "commonshub") return undefined;
+  if (ch.metadata?.kind === "fridge") return "fridge";
+  if (getApplicationName(ch.application) === "Luma") return "ticket";
+  if (/membership/i.test(description ?? "")) return "membership";
+  if (/donation/i.test(description ?? "") || ch.metadata?.kind === "donation") return "donation";
+  return undefined;
+}
+
+const idOf = (v: any): string | undefined => (typeof v === "string" ? v : v?.id);
+
+export async function describeStripeEvent(
+  event: any,
+  sessionMeta?: { collective?: string; customFieldsTable: string } | null
+): Promise<StripeTransaction | null> {
+  const ch = event.data.object;
+  if (event.type === "charge.refunded") {
+    const refundTxn = idOf(ch.refunds?.data?.[0]?.balance_transaction);
+    return {
+      kind: "refund",
+      amount: ch.amount_refunded,
+      currency: ch.currency,
+      from: ch.billing_details?.name || "unknown",
+      description: ch.description || ch.statement_descriptor || undefined,
+      receiptUrl: ch.receipt_url,
+      uri: refundTxn ? `stripe:${refundTxn}` : undefined,
+      category: "refund",
+      occurredAt: ch.refunds?.data?.[0]?.created ? new Date(ch.refunds.data[0].created * 1000).toISOString() : undefined,
+    };
+  }
+  if (event.type !== "charge.succeeded") return null;
+
+  let description =
+    ch.statement_descriptor ||
+    ch.calculated_statement_descriptor ||
+    ch.description;
+
+  let from = "unknown";
+
+  if (ch.customer) {
+    const customer = await stripe.customers.retrieve(ch.customer);
+    if (!customer.deleted && customer.name) {
+      from = customer.name;
+    }
+    if (!customer.deleted && customer.metadata?.discord_userid) {
+      from = `<@${customer.metadata.discord_userid}>`;
+    }
+  } else if (ch.billing_details?.name) {
+    from = ch.billing_details.name;
+  }
+
+  if (!ch.invoice && ch.payment_intent) {
+    console.log(">>> fetching ch.payment_intent", ch.payment_intent);
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      ch.payment_intent,
+      { expand: ["invoice"] }
+    );
+    if ("invoice" in paymentIntent && paymentIntent.invoice) {
+      const invoice = paymentIntent.invoice as Stripe.Invoice;
+      description = invoice.lines.data
+        .map((line: Stripe.InvoiceLineItem) => {
+          return line.description;
+        })
+        .join(" \n");
+    }
+  } else if (ch.invoice) {
+    try {
+      console.log(">>> fetching invoice", ch.invoice);
+      const invoice = await stripe.invoices.retrieve(ch.invoice);
+      description = invoice.lines.data
+        .map((line: Stripe.InvoiceLineItem) => {
+          return line.description;
+        })
+        .join(" \n");
+    } catch (e) {
+      console.error("Error getting invoice", ch.invoice, e);
+    }
+  }
+
+  // Some Open Collective charges carry no orderId: keep what Stripe says rather than failing the whole report.
+  const orderId = Number(ch.metadata?.orderId);
+  if (getApplicationName(ch.application) === "Open Collective" && Number.isFinite(orderId) && orderId > 0) {
+    try {
+      const orderInfo = await getOrderInfo(orderId);
+      if (orderInfo) {
+        description = orderInfo.description;
+        from = `[${orderInfo.createdByAccount.name}](<https://opencollective.com/${orderInfo.createdByAccount.slug}>)`;
+      }
+    } catch (e) {
+      console.error("Error getting Open Collective order", orderId, e);
+    }
+  }
+
+  if (getApplicationName(ch.application) === "Luma") {
+    description = `🎟️ Ticket for ${ch.description}`;
+  }
+
+  const collective = sessionMeta?.collective || ch.metadata?.collective || undefined;
+  const txn = idOf(ch.balance_transaction);
+  return {
+    kind: "charge",
+    amount: ch.amount,
+    currency: ch.currency,
+    from,
+    description: description || undefined,
+    applicationFee: ch.application_fee
+      ? `${formatAmount(ch.application_fee, ch.currency)} ${getApplicationName(ch.application)} application fee`
+      : undefined,
+    collective: sessionMeta?.collective,
+    customFieldsTable: sessionMeta?.customFieldsTable || undefined,
+    receiptUrl: ch.receipt_url,
+    uri: txn ? `stripe:${txn}` : undefined,
+    category: guessCategory(ch, description, collective),
+    occurredAt: ch.created ? new Date(ch.created * 1000).toISOString() : undefined,
+  };
+}
+
+/** The plain message, as the bot always posted it (and still does when the standard report is not available). */
+export function formatStripeMessage(t: StripeTransaction): string {
+  const description_string = t.description ? ` (${t.description})` : "";
+  if (t.kind === "refund") {
+    return `Refunded ${formatAmount(t.amount, t.currency)} to ${t.from}${description_string} [[View Receipt](<${t.receiptUrl}>)]`;
+  }
+  const collectiveStr = t.collective ? ` for **${t.collective}**` : "";
+  const applicationFee = t.applicationFee ? ` (including ${t.applicationFee})` : "";
+  let message = `💳 Received ${formatAmount(t.amount, t.currency)}${applicationFee} from ${t.from}${collectiveStr}${description_string} [[View Receipt](<${t.receiptUrl}>)]`;
+  if (t.customFieldsTable) message += t.customFieldsTable;
+  return message;
+}
+
+/** The token bot's standard report for it (lib/report.ts), or null without a balance transaction to name it by. */
+export function toReport(t: StripeTransaction): TransactionReport | null {
+  if (!t.uri) return null;
+  const extras = [t.collective ? `for ${t.collective}` : "", t.applicationFee ? `including ${t.applicationFee}` : ""].filter(Boolean).join(", ");
+  return {
+    uri: t.uri,
+    amount: t.amount / 100,
+    currency: t.currency.toUpperCase(),
+    direction: t.kind === "refund" ? "out" : "in",
+    counterparty: t.from === "unknown" ? undefined : t.from,
+    description: [t.description, extras ? `(${extras})` : ""].filter(Boolean).join(" ") || undefined,
+    links: t.receiptUrl ? [{ label: "Receipt", url: t.receiptUrl }] : undefined,
+    category: t.category,
+    occurredAt: t.occurredAt,
+  };
+}
+
 export async function summarizeStripeEvent(
   event: any,
   sessionMeta?: { collective?: string; customFieldsTable: string } | null
 ): Promise<string> {
-  const ch = event.data.object;
-  if (event.type === "charge.refunded") {
-    const description = ch.description || ch.statement_descriptor;
-    const description_string = description ? ` (${description})` : "";
-    return `Refunded ${formatAmount(ch.amount_refunded, ch.currency)} to ${
-      ch.billing_details?.name || "unknown"
-    }${description_string} [[View Receipt](<${ch.receipt_url}>)]`;
+  const t = await describeStripeEvent(event, sessionMeta);
+  return t ? formatStripeMessage(t) : `Received Stripe event: ${event.type}`;
+}
+
+/** Post a Stripe event to Discord: the standard report when it can be named by its balance transaction, else the plain message. */
+export async function publishStripeEvent(
+  event: any,
+  sessionMeta?: { collective?: string; customFieldsTable: string } | null,
+  extra: { threadId?: string } = {}
+) {
+  const t = await describeStripeEvent(event, sessionMeta);
+  if (!t) {
+    await postToDiscordChannel(`Received Stripe event: ${event.type}`);
+    return { via: "fallback" as const };
   }
-  if (event.type === "charge.succeeded") {
-    let description =
-      ch.statement_descriptor ||
-      ch.calculated_statement_descriptor ||
-      ch.description;
-
-    let from = "unknown";
-
-    if (ch.customer) {
-      const customer = await stripe.customers.retrieve(ch.customer);
-      if (!customer.deleted && customer.name) {
-        from = customer.name;
-      }
-      if (!customer.deleted && customer.metadata?.discord_userid) {
-        from = `<@${customer.metadata.discord_userid}>`;
-      }
-    } else if (ch.billing_details?.name) {
-      from = ch.billing_details.name;
-    }
-
-    if (!ch.invoice && ch.payment_intent) {
-      console.log(">>> fetching ch.payment_intent", ch.payment_intent);
-      const paymentIntent = await stripe.paymentIntents.retrieve(
-        ch.payment_intent,
-        { expand: ["invoice"] }
-      );
-      console.log(">>> paymentIntent", paymentIntent);
-      if ("invoice" in paymentIntent) {
-        const invoice = paymentIntent.invoice as Stripe.Invoice;
-        description = invoice.lines.data
-          .map((line: Stripe.InvoiceLineItem) => {
-            return line.description;
-          })
-          .join(" \n");
-      }
-    } else if (ch.invoice) {
-      try {
-        console.log(">>> fetching invoice", ch.invoice);
-        const invoice = await stripe.invoices.retrieve(ch.invoice);
-        description = invoice.lines.data
-          .map((line: Stripe.InvoiceLineItem) => {
-            return line.description;
-          })
-          .join(" \n");
-      } catch (e) {
-        console.error("Error getting invoice", ch.invoice, e);
-      }
-    }
-
-    if (getApplicationName(ch.application) === "Open Collective") {
-      const orderInfo = await getOrderInfo(Number(ch.metadata.orderId));
-      description = orderInfo.description;
-      from = `[${orderInfo.createdByAccount.name}](<https://opencollective.com/${orderInfo.createdByAccount.slug}>)`;
-    }
-
-    if (getApplicationName(ch.application) === "Luma") {
-      description = `🎟️ Ticket for ${ch.description}`;
-    }
-
-    // Enrich with checkout session metadata (collective, custom fields)
-    const collective = sessionMeta?.collective;
-    const collectiveStr = collective ? ` for **${collective}**` : "";
-
-    const description_string = description ? ` (${description})` : "";
-
-    const applicationFee = ch.application_fee
-      ? ` (including ${formatAmount(
-          ch.application_fee,
-          ch.currency
-        )} ${getApplicationName(ch.application)} application fee)`
-      : "";
-
-    let message = `💳 Received ${formatAmount(
-      ch.amount,
-      ch.currency
-    )}${applicationFee} from ${from}${collectiveStr}${description_string} [[View Receipt](<${
-      ch.receipt_url
-    }>)]`;
-
-    if (sessionMeta?.customFieldsTable) {
-      message += sessionMeta.customFieldsTable;
-    }
-
-    return message;
+  const report = toReport(t);
+  if (!report) {
+    await postToDiscordChannel(formatStripeMessage(t));
+    return { via: "fallback" as const };
   }
-  return `Received Stripe event: ${event.type}`;
+  return await reportTransaction({ ...report, ...extra }, formatStripeMessage(t));
 }
 
 export const handler = async (req: Request) => {
@@ -331,13 +423,12 @@ export const handler = async (req: Request) => {
 
   // Refunds don't need buffering — process immediately
   if (event.type === "charge.refunded") {
-    const summary = await summarizeStripeEvent(event);
     if (ignoreEvents.includes(event.id)) {
       console.log(">>> ignoring event", event.id);
-      console.log(">>> dry run discord message:", summary);
+      console.log(">>> dry run discord message:", await summarizeStripeEvent(event));
       return new Response("ok");
     }
-    await postToDiscordChannel(summary);
+    await publishStripeEvent(event);
     eventsProcessed++;
     return new Response("ok");
   }
@@ -347,22 +438,23 @@ export const handler = async (req: Request) => {
   const result = bufferEvent(event);
   if (result === null) {
     // No payment_intent — can't buffer, process immediately
-    const summary = await summarizeStripeEvent(event);
     if (ignoreEvents.includes(event.id)) {
       console.log(">>> ignoring event", event.id);
-      console.log(">>> dry run discord message:", summary);
+      console.log(">>> dry run discord message:", await summarizeStripeEvent(event));
       return new Response("ok");
     }
-    await postToDiscordChannel(summary);
+    await publishStripeEvent(event);
     eventsProcessed++;
   }
   return new Response("ok");
 };
 
-Deno.serve({ port: PORT }, handler);
+if (import.meta.main) {
+  Deno.serve({ port: PORT }, handler);
 
-console.log(
-  `Listening for Stripe webhooks on http://localhost:${PORT}/webhook/stripe`
-);
+  console.log(
+    `Listening for Stripe webhooks on http://localhost:${PORT}/webhook/stripe`
+  );
 
-console.log(">>> Using Discord channel", Deno.env.get("DISCORD_CHANNEL_ID"));
+  console.log(">>> Using Discord channel", Deno.env.get("DISCORD_CHANNEL_ID"));
+}
