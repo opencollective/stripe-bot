@@ -1,5 +1,5 @@
 # Use the official Deno image
-FROM denoland/deno:alpine-2.3.1
+FROM denoland/deno:alpine-2.7.14
 
 # Install curl
 RUN apk add --no-cache curl
@@ -12,4 +12,6 @@ WORKDIR /app
 # Copy your project files
 COPY . .
 
-CMD ["deno", "run", "--allow-env", "--allow-net=0.0.0.0,api.opencollective.com,discord.com,discord.gg,gateway.discord.gg,gateway-us-east1-b.discord.gg,api.stripe.com", "--no-prompt", "src/server.ts"]
+# Discord hands out a different gateway host from time to time (gateway-us-east1-b, -d, …): allow them all.
+# Wildcards in --allow-net need Deno 2.4+.
+CMD ["deno", "run", "--allow-env", "--allow-net=0.0.0.0,api.opencollective.com,discord.com,*.discord.com,discord.gg,*.discord.gg,api.stripe.com", "--no-prompt", "src/server.ts"]
