@@ -40,9 +40,20 @@ if (!threadId && !dryRun) {
 }
 
 let posted = 0, already = 0, skipped = 0;
+let canReadSessions = true;
 for (const ch of charges.slice(0, limit)) {
-  const sessions = ch.payment_intent ? await stripe.checkout.sessions.list({ payment_intent: ch.payment_intent, limit: 1 }) : { data: [] };
-  const meta = sessions.data[0] ? getCheckoutSessionMetadata(sessions.data[0]) : null;
+  // The bot's restricted key may not read Checkout Sessions: they only add the collective and custom fields, which the charge mostly carries.
+  let meta = null;
+  if (ch.payment_intent && canReadSessions) {
+    try {
+      const sessions = await stripe.checkout.sessions.list({ payment_intent: ch.payment_intent, limit: 1 });
+      meta = sessions.data[0] ? getCheckoutSessionMetadata(sessions.data[0]) : null;
+    } catch (e: any) {
+      if (e?.type !== "StripePermissionError") throw e;
+      canReadSessions = false;
+      console.warn("this key cannot read Checkout Sessions: posting without their metadata");
+    }
+  }
   const t = await describeStripeEvent({ type: "charge.succeeded", data: { object: ch } }, meta);
   const report = t && toReport(t);
   if (!report) {
