@@ -72,3 +72,5 @@ for (const ch of charges.slice(0, limit)) {
   await new Promise((r) => setTimeout(r, 1200));
 }
 console.log(`done: ${posted} posted, ${already} already reported, ${skipped} skipped`);
+// Importing the bot also logs it in to Discord, which would keep this script running.
+Deno.exit(0);
